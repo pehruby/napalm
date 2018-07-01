@@ -1601,6 +1601,9 @@ class IOSDriver(NetworkDriver):
         CMD_SHIBRR = 'show ip bgp neighbors {neigh} received-routes'
         CMD_SHIBRRV = 'show ip bgp vpnv4 vrf {vrf} neighbors {neigh} received-routes'
         vrflist = []
+        offsets = {}
+        offset_list = []
+        key_list = []
 
         try:
             ipv = ''
@@ -1653,11 +1656,63 @@ class IOSDriver(NetworkDriver):
                     if '% Inbound soft reconfiguration not enabled' in bgpcmdsplit[0]:
                         soft_enabled = False
                 else:
-                    for out_line in bgpcmdsplit:
-                        prefmatch = re.match(r"[ ]?([\*> sdrhi]+)[ ]*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\/\d{1,2}).*", out_line)
+                    for out_line in bgpcmdsplit:          # process headers
+                        headmatch = re.match(r"[ ]+Network[ ]+Next Hop.*", out_line) # find column ranges for Metric, LocPrf, Weight, Path
+                        if headmatch:
+                            for x in re.finditer('\w+', out_line): 
+                                offsets[x.group()] = x.start()
+                                offset_list.append(x.start())
+                                key_list.append(x.group())
+                            break           # there are no more headers bellow
+                    prefix_found = False
+                    for out_line in bgpcmdsplit[5:]:
+                        # *>i 19.230.255.54/32         # line with prefix only, attributes are on the next line
+                        prefmatch = re.match(r"[ ]?([\*> sdrhi]+)[ ]*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\/\d{1,2})$", out_line)
                         if prefmatch:
-                            prefitem = {'prefix': prefmatch.group(2)}
+                            if prefix_found:
+                                None
+                                for _item in entry_list:
+                                    # prefitem = {'prefix': cur_prefix}
+                                    prefitem = {'prefix': cur_prefix, 'as_path': _item['as_path']}
+                                    vrfpreflist.append(prefitem)
+                                cur_prefix = ''
+                            entry_list = []     # list for all next hops of this prefix
+                            prefix_found = True
+                            cur_prefix = prefmatch.group(2)
+                            continue
+                        # *>i 15.0.170.32/28   10.165.113.164           0    100      0 65261 i
+                        # *>i0.0.0.0          19.228.18.10            0    100      0 i
+                        prefmatch = re.match(r"[ ]?([\*> sdrhi]+)[ ]*([0-9]+.[0-9]+.[0-9]+.[0-9]+[0-9\/]*)[ ]+([0-9]+.[0-9]+.[0-9]+.[0-9]+).*", out_line)       # new prefix found
+                        if prefmatch:
+                            if prefix_found:        # process previous prefix
+                                for _item in entry_list:
+                                    # prefitem = {'prefix': cur_prefix}
+                                    prefitem = {'prefix': cur_prefix, 'as_path': _item['as_path']}
+                                    vrfpreflist.append(prefitem)
+                                cur_prefix = ''
+                            prefix_found = True
+                            cur_prefix = prefmatch.group(2)
+                            entry_list = []
+                            thisentry = {}
+                            splited_line = list(out_line)
+                            tmp_substr = ''.join(splited_line[offsets['Path']: None])
+                            thisentry['as_path'] = tmp_substr.strip()
+                            entry_list.append(thisentry)
+                            continue
+                        # *                    10.165.49.101                  50      0 65261 i
+                        nextmatch = re.match(r"[ ]?([\*> sdrhi]+)?[ ]+([0-9]+.[0-9]+.[0-9]+.[0-9]+) (.*)", out_line)     # other next hop found for prefix which was found on previous line(s)
+                        if nextmatch:
+                            thisentry = {}
+                            splited_line = list(out_line)
+                            tmp_substr = ''.join(splited_line[offsets['Path']: None])
+                            thisentry['as_path'] = tmp_substr.strip()
+                            entry_list.append(thisentry)
+                    if prefix_found:        # process last prefix
+                        for _item in entry_list:
+                            # prefitem = {'prefix': cur_prefix}
+                            prefitem = {'prefix': cur_prefix, 'as_path': _item['as_path']}
                             vrfpreflist.append(prefitem)
+
                 vrfdict = {}
                 vrfdict['prefix_list'] = vrfpreflist
                 vrfdict['soft_enabled'] = soft_enabled
