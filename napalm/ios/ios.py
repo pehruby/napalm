@@ -25,6 +25,8 @@ import tempfile
 import telnetlib
 import copy
 from collections import defaultdict
+from netaddr import IPNetwork
+from netaddr.core import AddrFormatError
 
 from netmiko import FileTransfer, InLineTransfer
 from napalm.base.base import NetworkDriver
@@ -1591,6 +1593,79 @@ class IOSDriver(NetworkDriver):
                 details['remote_as']].append(details)
         return bgp_detail
 
+    def get_bgp_recived_routes(self, neighbor_address='', vrf=''):
+        '''
+        '''
+        CMD_SHIBN = 'show ip bgp neighbors | include is {neigh}'
+        CMD_SHIBNV = 'show ip bgp vpnv4 vrf {vrf} neighbors | include is {neigh}'
+        CMD_SHIBRR = 'show ip bgp neighbors {neigh} received-routes'
+        CMD_SHIBRRV = 'show ip bgp vpnv4 vrf {vrf} neighbors {neigh} received-routes'
+        vrflist = []
+
+        try:
+            ipv = ''
+            if IPNetwork(neighbor_address).version == 6:
+                ipv = 'v6'
+        except AddrFormatError:
+            return 'Please specify a valid neighbor address!'
+        try:
+            ipv = ''
+            if IPNetwork(neighbor_address).version == 4:
+                ipv = 'v4'
+        except AddrFormatError:
+            return 'Please specify a valid neighbor addres!'
+
+        if ipv == 'v4':
+            if not vrf:
+                vrflist.append('default')
+            else:
+                conf_vrfs = self._get_vrfs('v4')
+                if vrf == 'all':
+                    vrflist = conf_vrfs[:]
+                    vrflist.append('default')
+                elif vrf in conf_vrfs:
+                    vrflist.append(vrf)
+                else:
+                    # IPv4 not configured in specified vrf
+                    # or vrf doesn't exist
+                    return  # empty dict
+            neigh_to_parse = []
+            for _vrf in vrflist:
+                if _vrf == 'default':
+                    bgpcmd = CMD_SHIBN.format(neigh=neighbor_address)
+                else:
+                    bgpcmd = CMD_SHIBNV.format(vrf=_vrf, neigh=neighbor_address)
+                outcmd = self._send_command(bgpcmd)
+                matchneigh = re.search(r"BGP neighbor is "+neighbor_address, outcmd)
+                if matchneigh:
+                    neigh_to_parse.append({'neigh': neighbor_address, 'vrf': _vrf})
+            outdict = {neighbor_address: {}}
+            for _neigh_item in neigh_to_parse:
+                vrfpreflist = []
+                soft_enabled = True
+                if _neigh_item['vrf'] == 'default':
+                    bgpcmd = CMD_SHIBRR.format(neigh=neighbor_address)
+                else:
+                    bgpcmd = CMD_SHIBRRV.format(vrf=_neigh_item['vrf'], neigh=neighbor_address)
+                outcmd = self._send_command(bgpcmd)
+                bgpcmdsplit = outcmd.split('\n')
+                if '% ' in bgpcmdsplit[0]:
+                    if '% Inbound soft reconfiguration not enabled' in bgpcmdsplit[0]:
+                        soft_enabled = False
+                else:
+                    for out_line in bgpcmdsplit:
+                        prefmatch = re.match(r"[ ]?([\*> sdrhi]+)[ ]*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\/\d{1,2}).*", out_line)
+                        if prefmatch:
+                            prefitem = {'prefix': prefmatch.group(2)}
+                            vrfpreflist.append(prefitem)
+                vrfdict = {}
+                vrfdict['prefix_list'] = vrfpreflist
+                vrfdict['soft_enabled'] = soft_enabled
+                vrfdict['prefix_items'] = len(vrfpreflist)
+                outdict[neighbor_address][_neigh_item['vrf']] = vrfdict
+
+        return(outdict)
+            
     def get_interfaces_counters(self):
         """
         Return interface counters and errors.
@@ -2143,6 +2218,39 @@ class IOSDriver(NetworkDriver):
             }
 
         return probes
+
+    def _get_vrfs(self, ipv=''):
+        """
+        Returns list of all VRFs (if ipv='') or VRFs which have ipv4 (ipv='v4') or
+        ipv6 (ipv='v6') configured
+        param ipv can contain '','v4' or 'v6'
+        """
+        vrfs = []
+
+        if ipv not in ['', 'v4', 'v6']:
+            return(vrfs)
+        command = 'show vrf'
+        output = self._send_command(command)
+
+        if '% Invalid input detected' in output:
+            # 'sh vrf' command is not supported
+            # try 'sh ip vrf' command and return all vrf names regardless of ip version ...
+            command = 'show ip vrf'
+            output = self._send_command(command)
+            out_lines = output.split('\n')
+            for line in out_lines[1:]:
+                vrfstr = re.match(r"[ ]{2}(\S+)", line)
+                if vrfstr:
+                    vrfs.append(vrfstr.group(1))
+        else:
+            out_lines = output.split('\n')
+            for line in out_lines[1:]:
+                #   TEST                             65417:2               ipv4,ipv6
+                vrfstr = re.match(r"[ ]{2}(\S+)[ ]+[<> a-z:\d]+[ ]+([a-z\d,]+)", line)
+                if vrfstr:
+                    if ipv == '' or ipv in vrfstr.group(2):
+                        vrfs.append(vrfstr.group(1))
+        return(vrfs)
 
     def get_snmp_information(self):
         """
