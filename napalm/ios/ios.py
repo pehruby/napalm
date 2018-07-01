@@ -1600,6 +1600,10 @@ class IOSDriver(NetworkDriver):
         CMD_SHIBNV = 'show ip bgp vpnv4 vrf {vrf} neighbors | include is {neigh}'
         CMD_SHIBRR = 'show ip bgp neighbors {neigh} received-routes'
         CMD_SHIBRRV = 'show ip bgp vpnv4 vrf {vrf} neighbors {neigh} received-routes'
+        RE_SHBGP1 = r"[ ]?([\*> sdrhi]+)[ ]*(" + IP_ADDR_REGEX + r"\/\d{1,2})$"
+        RE_SHBGP2 = r"[ ]?([\*> sdrhi]+)[ ]*(" + IP_ADDR_REGEX + r"\/\d{1,2})[ ]+(" + \
+            IP_ADDR_REGEX + ").*"
+        RE_SHBGP3 = r"[ ]?([\*> sdrhi]+)?[ ]+(" + IP_ADDR_REGEX + r") (.*)"
         vrflist = []
         offsets = {}
         offset_list = []
@@ -1657,17 +1661,20 @@ class IOSDriver(NetworkDriver):
                         soft_enabled = False
                 else:
                     for out_line in bgpcmdsplit:          # process headers
-                        headmatch = re.match(r"[ ]+Network[ ]+Next Hop.*", out_line) # find column ranges for Metric, LocPrf, Weight, Path
+                        # find column ranges for Metric, LocPrf, Weight, Path
+                        headmatch = re.match(r"[ ]+Network[ ]+Next Hop.*", out_line)
                         if headmatch:
-                            for x in re.finditer('\w+', out_line): 
+                            for x in re.finditer('\w+', out_line):
                                 offsets[x.group()] = x.start()
                                 offset_list.append(x.start())
                                 key_list.append(x.group())
                             break           # there are no more headers bellow
                     prefix_found = False
                     for out_line in bgpcmdsplit[5:]:
-                        # *>i 19.230.255.54/32         # line with prefix only, attributes are on the next line
-                        prefmatch = re.match(r"[ ]?([\*> sdrhi]+)[ ]*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\/\d{1,2})$", out_line)
+                        # line with prefix only, attributes are on the next line
+                        # *>i 19.230.255.54/32
+                        prefmatch = \
+                            re.match(RE_SHBGP1, out_line)
                         if prefmatch:
                             if prefix_found:
                                 None
@@ -1680,9 +1687,10 @@ class IOSDriver(NetworkDriver):
                             prefix_found = True
                             cur_prefix = prefmatch.group(2)
                             continue
+                        # new prefix found
                         # *>i 15.0.170.32/28   10.165.113.164           0    100      0 65261 i
                         # *>i0.0.0.0          19.228.18.10            0    100      0 i
-                        prefmatch = re.match(r"[ ]?([\*> sdrhi]+)[ ]*([0-9]+.[0-9]+.[0-9]+.[0-9]+[0-9\/]*)[ ]+([0-9]+.[0-9]+.[0-9]+.[0-9]+).*", out_line)       # new prefix found
+                        prefmatch = re.match(RE_SHBGP2, out_line)
                         if prefmatch:
                             if prefix_found:        # process previous prefix
                                 for _item in entry_list:
@@ -1699,8 +1707,9 @@ class IOSDriver(NetworkDriver):
                             thisentry['as_path'] = tmp_substr.strip()
                             entry_list.append(thisentry)
                             continue
+                        # other next hop found for prefix which was found on previous line(s)
                         # *                    10.165.49.101                  50      0 65261 i
-                        nextmatch = re.match(r"[ ]?([\*> sdrhi]+)?[ ]+([0-9]+.[0-9]+.[0-9]+.[0-9]+) (.*)", out_line)     # other next hop found for prefix which was found on previous line(s)
+                        nextmatch = re.match(RE_SHBGP3, out_line)
                         if nextmatch:
                             thisentry = {}
                             splited_line = list(out_line)
@@ -1720,7 +1729,7 @@ class IOSDriver(NetworkDriver):
                 outdict[neighbor_address][_neigh_item['vrf']] = vrfdict
 
         return(outdict)
-            
+
     def get_interfaces_counters(self):
         """
         Return interface counters and errors.
